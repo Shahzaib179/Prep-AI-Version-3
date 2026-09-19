@@ -21,7 +21,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 
-st.set_page_config(page_title="Prep AI V3", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="Prep AI", page_icon="🎓", layout="wide")
 
 APP_ROOT = Path(__file__).resolve().parent
 DATABASE_DIR = APP_ROOT / "faiss_index"
