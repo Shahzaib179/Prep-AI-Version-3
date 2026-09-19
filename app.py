@@ -490,232 +490,27 @@ def parse_mcq_json(raw):
 # -----------------------------
 # Google Drive + document processing
 # -----------------------------
-def is_drive_folder_url(url):
-    return bool(
-        re.search(
-            r"drive\.google\.com/drive/(?:u/\d+/)?folders/",
-            url,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
-def is_drive_file_url(url):
-    return bool(
-        re.search(
-            r"drive\.google\.com/(?:file/d/|open\?|uc\?)",
-            url,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
 def load_drive_file(url):
-    """
-    Download a single public Google Drive file.
-
-    gdown >= 6 automatically parses supported Drive share links.
-    No fuzzy=True is used because that argument was removed in current gdown.
-    """
-    with tempfile.TemporaryDirectory() as temp_dir:
-        output_path = Path(temp_dir) / "drive_download"
-
-        downloaded = gdown.download(
-            url=url,
-            output=str(output_path),
-            quiet=True,
-            use_cookies=False,
-        )
-
-        if not downloaded:
-            raise ValueError(
-                "Google Drive file download failed. "
-                "Check that the file is shared as Anyone with the link / Viewer."
-            )
-
-        path = Path(downloaded)
-        file_bytes = path.read_bytes()
-
-    ext = detect_content_extension(file_bytes, url)
-
-    if not ext:
-        raise ValueError(
-            "Google Drive file type could not be detected. "
-            "Supported formats are PDF, DOCX, TXT and MD."
-        )
-
-    default_names = {
-        ".pdf": "Google Drive document.pdf",
-        ".docx": "Google Drive document.docx",
-        ".txt": "Google Drive document.txt",
-        ".md": "Google Drive document.md",
-    }
-
-    return [
-        {
-            "name": default_names[ext],
-            "bytes": file_bytes,
-            "source_path": default_names[ext],
-        }
-    ]
-
-
-def load_drive_folder(url):
-    """
-    Download a public Google Drive folder recursively and return only
-    supported study documents.
-
-    The original filenames and relative folder paths are preserved.
-    """
-    with tempfile.TemporaryDirectory() as temp_dir:
-        download_root = Path(temp_dir) / "drive_folder"
-        download_root.mkdir(parents=True, exist_ok=True)
-
-        try:
-            result = gdown.download_folder(
-                url=url,
-                output=str(download_root),
-                quiet=True,
-                use_cookies=False,
-            )
-        except Exception as exc:
-            raise ValueError(
-                "Google Drive folder download failed. Make sure the folder "
-                "is shared as Anyone with the link / Viewer."
-            ) from exc
-
-        # gdown returns downloaded file descriptors in current versions,
-        # but scanning the output directory is more robust across releases.
-        paths = [
-            p for p in download_root.rglob("*")
-            if p.is_file()
-        ]
-
-        # Some gdown versions may place files one level below the requested
-        # directory. If scanning is empty, also inspect returned paths.
-        if not paths and result:
-            for item in result:
-                candidate = getattr(item, "path", None)
-                if candidate:
-                    candidate_path = Path(candidate)
-                    if candidate_path.exists() and candidate_path.is_file():
-                        paths.append(candidate_path)
-
-        supported = []
-
-        for path in paths:
-            ext = path.suffix.lower()
-
-            # Never ingest HTML pages, Google Drive metadata or unknown binaries.
-            if ext not in SUPPORTED_EXTENSIONS:
-                continue
-
-            file_bytes = path.read_bytes()
-
-            detected = detect_content_extension(
-                file_bytes,
-                path.name,
-            )
-
-            if detected not in SUPPORTED_EXTENSIONS:
-                continue
-
-            relative = path.relative_to(download_root).as_posix()
-
-            supported.append(
-                {
-                    "name": path.name,
-                    "bytes": file_bytes,
-                    "source_path": relative,
-                }
-            )
-
-        if not supported:
-            raise ValueError(
-                "The Google Drive folder was downloaded, but no supported "
-                "PDF, DOCX, TXT or MD files were found."
-            )
-
-        return supported
-
-
-def load_drive_source(url):
-    url = url.strip()
-
-    if is_drive_folder_url(url):
-        return load_drive_folder(url)
-
-    if is_drive_file_url(url):
-        return load_drive_file(url)
-
-    raise ValueError(
-        "Please provide a Google Drive file or folder sharing link."
-    )
+    downloaded = gdown.download(url=url, output=None, quiet=True)
+    if not downloaded:
+        raise ValueError("Google Drive download failed. Make sure the file is shared correctly.")
+    path = Path(downloaded)
+    return {"name": path.name, "bytes": path.read_bytes()}
 
 
 def process_files(items, chunk_size, overlap):
-    records = []
-    document_info = []
-
+    records, info = [], []
     for item in items:
-        filename = item["name"]
-        source_path = item.get("source_path", filename)
-
-        extracted = extract_document(
-            item["bytes"],
-            filename,
-            source_path,
-        )
-
+        extracted = extract_document(item["bytes"], item["name"])
         records.extend(extracted)
-
-        extension = detect_content_extension(
-            item["bytes"],
-            filename,
-        )
-
-        if extension == ".pdf":
-            page_values = [
-                r.get("page_count")
-                for r in extracted
-                if r.get("page_count")
-            ]
-            pages = max(page_values) if page_values else 0
-        else:
-            pages = None
-
-        document_info.append(
-            {
-                "filename": filename,
-                "source": source_path,
-                "file_type": extension.upper().replace(".", ""),
-                "characters": sum(
-                    len(r["text"]) for r in extracted
-                ),
-                "pages": pages if pages else "N/A",
-                "chunks": 0,
-            }
-        )
-
-    chunks = chunk_text_records(
-        records,
-        chunk_size,
-        overlap,
-    )
-
-    # Count chunks per source file.
-    chunk_counts = {}
-    for chunk in chunks:
-        source_key = chunk.get("source_path", chunk["filename"])
-        chunk_counts[source_key] = chunk_counts.get(source_key, 0) + 1
-
-    for row in document_info:
-        row["chunks"] = chunk_counts.get(
-            row["source"],
-            0,
-        )
-
-    return chunks, document_info
+        pages = {r["page"] for r in extracted if r.get("page") is not None}
+        info.append({
+            "filename": item["name"],
+            "characters": sum(len(r["text"]) for r in extracted),
+            "pages": len(pages) if pages else None,
+        })
+    chunks = chunk_text_records(records, chunk_size, overlap)
+    return chunks, info
 
 
 # -----------------------------
